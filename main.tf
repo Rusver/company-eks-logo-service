@@ -3,6 +3,7 @@
 
 provider "aws" {
   region = var.region
+  #profile = "General-Admin-PS" # Add Profile
 }
 
 
@@ -95,82 +96,159 @@ resource "aws_network_acl_rule" "public_all_egress" {
   cidr_block     = "0.0.0.0/0"
 }
 
-# Reference the existing IAM role by name
-data "aws_iam_role" "eks_service_role" {
-  name = "AWSServiceRoleForAmazonEKS"
+# Define the IAM role with the assume role policy document from the existing role
+resource "aws_iam_role" "eks_service_role" {
+  name               = "RUSServiceRoleForAmazonEKS"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Action    = "sts:AssumeRole"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      }
+    ]
+  })
 }
 
 
+# Attach the AmazonEKSClusterPolicy managed policy to the new IAM role
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy_attachment" {
+  role       = aws_iam_role.eks_service_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "attach_eks_node_policy_one" {
+  role       = module.eks.eks_managed_node_groups["one"].iam_role_name
+  policy_arn = "arn:aws:iam::aws:policy/aws-service-role/AWSServiceRoleForAmazonEKSNodegroup"
+}
+
+resource "aws_iam_role_policy_attachment" "attach_eks_node_policy_two" {
+  role       = module.eks.eks_managed_node_groups["two"].iam_role_name
+  policy_arn = "arn:aws:iam::aws:policy/aws-service-role/AWSServiceRoleForAmazonEKSNodegroup"
+}
+
+### OIDC config
+/*
+resource "aws_iam_openid_connect_provider" "cluster" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = []
+  url             = module.eks.cluster_oidc_issuer_url
+}
+*/
+
+
+########################## RDS ###################################
+
+
+module "RDS" {
+  source = "terraform-aws-modules/rds/aws"
+  depends_on = [module.vpc]
+
+  identifier = "demodb"
+
+  engine            = "postgres"
+  # DB option group
+  engine_version    = "16.3"
+  instance_class    = "db.t4g.micro"
+  allocated_storage = 5
+  storage_type = "standard"
+
+  db_name  = "demodb"
+  username = "ruslan"
+  port     = "3306"
+
+  iam_database_authentication_enabled = true
+
+
+
+  # Enhanced Monitoring - see example for details on how to create the role
+  # by yourself, in case you don't want to create it automatically
+  # monitoring_interval    = "30"
+  # monitoring_role_name   = "MyRDSMonitoringRole"
+  create_monitoring_role = false
+
+  tags = {
+    Owner       = "ruslan"
+    Environment = "dev"
+  }
+
+  # DB subnet group
+  create_db_subnet_group  = true
+  #vpc_security_group_ids  = [module.eks.cluster_security_group_id]
+
+  # DB parameter group
+  family = "postgres16"
+
+  
+
+  # Database Deletion Protection
+  deletion_protection = false
+}
+
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "20.24.1"
+  version = "20.29.0"
 
   cluster_name    = local.cluster_name
   cluster_version = "1.31"
 
   create_iam_role = false
-  iam_role_arn = data.aws_iam_role.eks_service_role.arn  # Set the cluster role ARN
+  iam_role_arn = aws_iam_role.eks_service_role.arn  # Set the cluster role ARN
 
   cluster_endpoint_public_access           = true
   enable_cluster_creator_admin_permissions = true
 
-  cluster_addons = {
-    /*
-    aws-ebs-csi-driver = {
-      service_account_role_arn = module.irsa-ebs-csi.iam_role_arn
-    }*/
-  }
-
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
-
-  eks_managed_node_group_defaults = {
-    ami_type = "AL2_x86_64"
-    node_role_arn = data.aws_iam_role.eks_service_role.arn
-
-  }
 
   cluster_upgrade_policy = {  
     support_type = "STANDARD"  # Set to STANDARD or EXTENDED as needed
   }
+  
+  
+  eks_managed_node_group_defaults = {
+    ami_type = "AL2_x86_64"
+    #node_role_arn = data.aws_iam_role.eks_node_group_service_role.arn
 
+  }
   eks_managed_node_groups = {
     one = {
       name = "node-group-1"
-      node_role_arn = data.aws_iam_role.eks_service_role.arn # Use the existing role
+      #node_role_arn = data.aws_iam_role.eks_node_group_service_role.arn # Use the existing role
 
-      instance_types = ["t3.small"]
+      instance_types = ["t2.micro"]
 
       min_size     = 1
-      max_size     = 3
+      max_size     = 2
       desired_size = 2
 
     }
 
     two = {
       name = "node-group-2"
-      node_role_arn = data.aws_iam_role.eks_service_role.arn # Use the existing role
+      #node_role_arn = data.aws_iam_role.eks_node_group_service_role.arn # Use the existing role
       
-      instance_types = ["t3.small"]
+      instance_types = ["t2.micro"]
 
       min_size     = 1
       max_size     = 2
       desired_size = 1
     }
   }
+  /*
+  cluster_addons = {
+    
+    aws-ebs-csi-driver = {
+      service_account_role_arn = module.irsa-ebs-csi.iam_role_arn
+    }
+  }
+  */
 }
 
-/*
-resource "aws_iam_role_policy_attachment" "attach_eks_node_policy_one" {
-  role       = module.eks.eks_managed_node_groups["one"].iam_role_name
-  policy_arn = data.aws_iam_role.eks_service_role.arn
-}
 
-resource "aws_iam_role_policy_attachment" "attach_eks_node_policy_two" {
-  role       = module.eks.eks_managed_node_groups["two"].iam_role_name
-  policy_arn = data.aws_iam_role.eks_service_role.arn
-}
-*/
 
 /*
 # https://aws.amazon.com/blogs/containers/amazon-ebs-csi-driver-is-now-generally-available-in-amazon-eks-add-ons/ 
@@ -268,7 +346,7 @@ resource "helm_release" "aws_load_balancer_controller" {
 
   set {
     name  = "region"
-    value = "eu-west-1"
+    value = "il-central-1"
   }
 }
 
